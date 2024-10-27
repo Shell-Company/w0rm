@@ -2,6 +2,9 @@
 w0rm -  A Snake clone sprinkled with hacker lore. Compress, Shield and Overclock your way to victory
 >This is a browser game where you control a worm that collects byte data fragments.
 
+# Play
+visit https://shell-company.github.io/w0rm/
+
 # Gameplay
 Use the WASD keys to move the worm around the grid.
 Collect byte data fragments (represented by different colors) to increase your score.
