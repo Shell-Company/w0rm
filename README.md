@@ -14,7 +14,9 @@ Occasionally, special items will appear that can grant temporary power-ups.
 
 # Power-Ups
 GZIP: Compresses your worm, allowing you to collect more data in a smaller space (temporary).
-DeRez: Grants temporary invincibility to the DeRez hazard (a special hazard not currently implemented).
+
+DeRez: Grants temporary invincibility to derez when colliding with the snakes body. 3 hits
+
 Starting the Game
 
 Open the index.html file in your web browser to start playing.
