@@ -17,4 +17,4 @@ Starting the Game
 Open the index.html file in your web browser to start playing.
 
 # Game Over
-The game ends when your worm collides with itself or the edge of the screen.  The game screen displays your final score and the amount of data collected.  Pressing Space will restart the game.
+The game ends when your worm collides with itself.  The game screen displays your final score and the amount of data collected.  Pressing Space will restart the game.
