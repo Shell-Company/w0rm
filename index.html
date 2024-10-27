@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>w0rm - Byte Collector</title>
+<style>
+  body {
+    margin: 0;
+    background-color: #001100;
+    overflow: hidden;
+    font-family: monospace;
+  }
+canvas {
+    display: block;
+    margin: auto;
+    background-color: #001100; /* Remove the background image pattern */
+}
+  #infoOverlay {
+    position: fixed;
+    top: 10px;
+    left: 10px;
+    color: #00FF00;
+    font-family: monospace;
+    text-shadow: 0 0 5px #00FF00;
+    pointer-events: none;
+    z-index: 100;
+    font-size: 14px;
+    padding: 10px;
+    background: rgba(0,17,0,0.7);
+  }
+  #effects {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #FF0000;
+    font-family: monospace;
+    font-size: 48px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    text-shadow: 0 0 10px currentColor;
+  }
+  #gameOver {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #FF0000;
+    font-family: monospace;
+    background: rgba(0,0,0,0.9);
+    padding: 20px;
+    border: 2px solid #00FF00;
+    text-align: center;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div id="infoOverlay"></div>
+<div id="effects">Hit!</div>
+<div id="gameOver">
+    <h2>Game Over</h2>
+    <p>Final Score: <span id="finalScore">0</span></p>
+    <p>Data Collected: <span id="finalData">0</span> bytes</p>
+    <p>Press Space to Restart</p>
+</div>
+<canvas id="gameCanvas"></canvas>
+
+<script>
+// Canvas and context setup
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const infoOverlay = document.getElementById('infoOverlay');
+const effectsDisplay = document.getElementById('effects');
+const gameOverScreen = document.getElementById('gameOver');
+
+// Game Constants
+const GRID_SIZE = 20;
+const INITIAL_SPEED = 100;
+const OVERCLOCK_MULTIPLIER = 2;
+const SEGMENT_SPACING = 1.5;
+const SPECIAL_ITEM_CHANCE = 0.15;
+const COMPRESSION_RATIO = 3;
+const POWERUP_DURATION = 10000;
+const DEREZ_MAX_HITS = 3;
+
+// Tensor size configurations
+const TENSOR_SIZES = [
+    { size: 2, probability: 0.5, scoreMultiplier: 1 },
+    { size: 4, probability: 0.3, scoreMultiplier: 2 },
+    { size: 8, probability: 0.2, scoreMultiplier: 4 }
+];
+
+// File types with scoring
+const FILE_TYPES = [
+    {
+        type: 'PE',
+        generateBytes: (size) => {
+            const bytes = new Array(size * size).fill(0).map(() => Math.floor(Math.random() * 256));
+            bytes[0] = 0x4D; // MZ
+            bytes[1] = 0x5A;
+            bytes[2] = 0x90;
+            bytes[3] = 0x00;
+            return bytes;
+        },
+        color: '#00FF00',
+        baseScore: 100
+    },
+    {
+        type: 'ELF',
+        generateBytes: (size) => {
+            const bytes = new Array(size * size).fill(0).map(() => Math.floor(Math.random() * 256));
+            bytes[0] = 0x7F;
+            bytes[1] = 0x45;
+            bytes[2] = 0x4C;
+            bytes[3] = 0x46;
+            return bytes;
+        },
+        color: '#00FFAA',
+        baseScore: 150
+    },
+    {
+        type: 'PDF',
+        generateBytes: (size) => {
+            const bytes = new Array(size * size).fill(0).map(() => Math.floor(Math.random() * 256));
+            bytes[0] = 0x25;
+            bytes[1] = 0x50;
+            bytes[2] = 0x44;
+            bytes[3] = 0x46;
+            return bytes;
+        },
+        color: '#AAFF00',
+        baseScore: 200
+    },
+    {
+        type: 'TENSOR',
+        generateBytes: (size) => {
+            const bytes = new Array(size * size).fill(0).map(() => Math.floor(Math.random() * 256));
+            bytes[0] = 0x54; // T
+            bytes[1] = 0x45; // E
+            bytes[2] = 0x4E; // N
+            bytes[3] = 0x53; // S
+            return bytes;
+        },
+        color: '#FF00FF',
+        baseScore: 300
+    }
+];
+
+// Special items
+const SPECIAL_ITEMS = [
+    {
+        type: 'GZIP',
+        color: '#0088FF',
+        effect: () => activateCompression(),
+        symbol: '[ ]'
+    },
+    {
+        type: 'DeRez',
+        color: '#FF0000',
+        effect: () => activateDeRezImmunity(),
+        symbol: '!!'
+    }
+];
+
+// Game state variables
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+let tileCountX = Math.floor(canvas.width / GRID_SIZE);
+let tileCountY = Math.floor(canvas.height / GRID_SIZE);
+
+// Game state
+let worm = [];
+let velocity = { x: 0, y: 0 };
+let foodItems = [];
+let specialItems = [];
+let overclock = false;
+let gameSpeed = INITIAL_SPEED;
+let gameInterval;
+let score = 0;
+let collectedBytes = [];
+let gameActive = true;
+
+// Power-up states
+let isCompressed = false;
+let isDeRezImmune = false;
+let deRezHitsRemaining = 0;
+let compressionStartIndex = -1;
+let powerupTimer = null;
+// Core initialization functions
+function initWorm() {
+    const centerX = Math.floor(tileCountX / 2);
+    const centerY = Math.floor(tileCountY / 2);
+    worm = [
+        { x: centerX, y: centerY, byte: 0x41, color: '#00FF00', source: 'PE' },
+        { x: centerX - SEGMENT_SPACING, y: centerY, byte: 0x45, color: '#00FF00', source: 'PE' },
+        { x: centerX - SEGMENT_SPACING * 2, y: centerY, byte: 0x00, color: '#00FF00', source: 'PE' },
+        { x: centerX - SEGMENT_SPACING * 3, y: centerY, byte: 0x00, color: '#00FF00', source: 'PE' }
+    ];
+    gameActive = true;
+    gameOverScreen.style.display = 'none';
+}
+
+function init() {
+    initWorm();
+    for (let i = 0; i < 3; i++) {
+        placeFood();
+    }
+    document.addEventListener('keydown', keyDown);
+    gameInterval = setInterval(gameLoop, gameSpeed);
+    updateInfoOverlay();
+}
+
+// Input handling
+function keyDown(e) {
+    if (!gameActive && e.key === ' ') {
+        resetGame();
+        return;
+    }
+
+    if (!gameActive) return;
+    
+    switch (e.key.toLowerCase()) {
+        case 'w':
+            if (velocity.y === 0) velocity = { x: 0, y: -1 };
+            break;
+        case 's':
+            if (velocity.y === 0) velocity = { x: 0, y: 1 };
+            break;
+        case 'a':
+            if (velocity.x === 0) velocity = { x: -1, y: 0 };
+            break;
+        case 'd':
+            if (velocity.x === 0) velocity = { x: 1, y: 0 };
+            break;
+        case ' ':
+            overclock = true;
+            clearInterval(gameInterval);
+            gameInterval = setInterval(gameLoop, gameSpeed / OVERCLOCK_MULTIPLIER);
+            break;
+    }
+}
+
+document.addEventListener('keyup', function(e) {
+    if (e.key === ' ' && gameActive) {
+        overclock = false;
+        clearInterval(gameInterval);
+        gameInterval = setInterval(gameLoop, gameSpeed);
+    }
+});
+
+// Power-up activation functions
+function activateCompression() {
+    if (isCompressed) return;
+    
+    isCompressed = true;
+    compressionStartIndex = Math.floor(worm.length / 3);
+    const compressedLength = Math.floor(worm.length / COMPRESSION_RATIO);
+    
+    // Store segments to preserve their data
+    const preservedSegments = worm.slice(0, compressedLength).map(segment => ({
+        ...segment,
+        x: segment.x,
+        y: segment.y,
+        byte: segment.byte,
+        color: segment.color,
+        source: segment.source
+    }));
+    
+    // Add compression markers
+    preservedSegments.push(
+        { x: worm[compressedLength].x, y: worm[compressedLength].y, byte: 0x5B, color: '#0088FF', source: 'GZIP' },
+        { x: worm[compressedLength].x, y: worm[compressedLength].y, byte: 0x5D, color: '#0088FF', source: 'GZIP' }
+    );
+    
+    worm = preservedSegments;
+    
+    if (powerupTimer) clearTimeout(powerupTimer);
+    powerupTimer = setTimeout(() => {
+        isCompressed = false;
+        compressionStartIndex = -1;
+    }, POWERUP_DURATION);
+}
+
+function activateDeRezImmunity() {
+    isDeRezImmune = true;
+    deRezHitsRemaining = DEREZ_MAX_HITS;
+    effectsDisplay.style.opacity = '1';
+    effectsDisplay.style.color = '#FF0000';
+    effectsDisplay.textContent = `DeRez Shield Active! (${deRezHitsRemaining} hits)`;
+    
+    setTimeout(() => {
+        effectsDisplay.style.opacity = '0';
+    }, 1000);
+}
+
+function showDeRezHit() {
+    deRezHitsRemaining--;
+    effectsDisplay.style.opacity = '1';
+    effectsDisplay.style.color = '#FF0000';
+    effectsDisplay.textContent = `DeRez Hit! (${deRezHitsRemaining} left)`;
+    
+    setTimeout(() => {
+        effectsDisplay.style.opacity = '0';
+    }, 1000);
+    
+    if (deRezHitsRemaining <= 0) {
+        isDeRezImmune = false;
+    }
+    
+    score = Math.max(0, score - 100);
+}
+
+// Main game loop and update functions
+function gameLoop() {
+    if (!gameActive) return;
+    update();
+    draw();
+    updateInfoOverlay();
+}
+
+function update() {
+    const head = {
+        x: (worm[0].x + velocity.x * SEGMENT_SPACING + tileCountX) % tileCountX,
+        y: (worm[0].y + velocity.y * SEGMENT_SPACING + tileCountY) % tileCountY,
+        byte: worm[0].byte,
+        color: worm[0].color,
+        source: worm[0].source
+    };
+
+    // Check collision with self
+    let selfCollision = false;
+    for (let i = 4; i < worm.length; i++) {
+        if (Math.abs(worm[i].x - head.x) < 0.5 && Math.abs(worm[i].y - head.y) < 0.5) {
+            selfCollision = true;
+            break;
+        }
+    }
+
+    if (selfCollision) {
+        if (isDeRezImmune) {
+            showDeRezHit();
+        } else {
+            endGame();
+            return;
+        }
+    }
+
+    worm.unshift(head);
+
+    // Handle food and special item collisions
+    handleCollisions();
+    
+    // Replenish items
+    while (foodItems.length < 3) {
+        placeFood();
+    }
+    
+    if (specialItems.length < 1 && Math.random() < SPECIAL_ITEM_CHANCE) {
+        placeSpecialItem();
+    }
+}
+
+function handleCollisions() {
+    const head = worm[0];
+    let foodEaten = false;
+
+    // Check food collisions with improved hit detection
+    foodItems = foodItems.filter(food => {
+        // Check if head is within the bounds of this food item
+        const headInXRange = head.x >= food.x && head.x < (food.x + food.size);
+        const headInYRange = head.y >= food.y && head.y < (food.y + food.size);
+        
+        if (headInXRange && headInYRange) {
+            // Process food consumption
+            const sizeMultiplier = TENSOR_SIZES.find(t => t.size === food.size).scoreMultiplier;
+            const baseScore = FILE_TYPES.find(t => t.type === food.type).baseScore;
+            score += Math.floor(baseScore * sizeMultiplier);
+            
+            if (!isCompressed) {
+                food.bytes.forEach((byte, index) => {
+                    collectedBytes.push(byte);
+                    const newSegment = {
+                        x: worm[worm.length - 1].x - (velocity.x ? SEGMENT_SPACING : 0),
+                        y: worm[worm.length - 1].y - (velocity.y ? SEGMENT_SPACING : 0),
+                        byte: byte,
+                        color: food.color,
+                        source: food.type
+                    };
+                    worm.push(newSegment);
+                });
+            } else {
+                // Compressed data collection
+                const compressedBytes = food.bytes.slice(0, Math.ceil(food.bytes.length / COMPRESSION_RATIO));
+                compressedBytes.forEach(byte => {
+                    collectedBytes.push(byte);
+                    const newSegment = {
+                        x: worm[worm.length - 1].x - (velocity.x ? SEGMENT_SPACING : 0),
+                        y: worm[worm.length - 1].y - (velocity.y ? SEGMENT_SPACING : 0),
+                        byte: byte,
+                        color: food.color,
+                        source: food.type
+                    };
+                    worm.push(newSegment);
+                });
+            }
+            
+            foodEaten = true;
+            return false;
+        }
+        return true;
+    });
+
+    // Check special item collisions with improved hit detection
+    specialItems = specialItems.filter(item => {
+        // More forgiving hitbox for special items
+        const distanceX = Math.abs(item.x - head.x);
+        const distanceY = Math.abs(item.y - head.y);
+        
+        if (distanceX < 1 && distanceY < 1) {
+            item.effect();
+            return false;
+        }
+        return true;
+    });
+
+    if (!foodEaten) {
+        worm.pop();
+    }
+}
+function endGame() {
+    gameActive = false;
+    clearInterval(gameInterval);
+    
+    // Update game over screen
+    document.getElementById('finalScore').textContent = score;
+    document.getElementById('finalData').textContent = collectedBytes.length;
+    gameOverScreen.style.display = 'block';
+}
+// Drawing functions
+function draw() {
+    // Clear canvas while preserving grid
+    ctx.fillStyle = 'rgba(0, 17, 0, 0.9)'; // Semi-transparent to show grid
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Ensure grid is visible
+    const gridPattern = ctx.createPattern(createGridCanvas(), 'repeat');
+    ctx.fillStyle = gridPattern;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Draw food items
+    foodItems.forEach(food => {
+        for (let y = 0; y < food.size; y++) {
+            for (let x = 0; x < food.size; x++) {
+                const index = y * food.size + x;
+                const byte = food.bytes[index];
+                const displayX = (food.x + x) % tileCountX;
+                const displayY = (food.y + y) % tileCountY;
+                
+                drawCharacter(
+                    displayX,
+                    displayY,
+                    byte.toString(16).padStart(2, '0').toUpperCase(),
+                    food.color,
+                    true
+                );
+            }
+        }
+        
+        // Draw food type indicator
+        ctx.fillStyle = food.color;
+        ctx.font = `${GRID_SIZE * 0.5}px monospace`;
+        ctx.fillText(
+            food.type,
+            food.x * GRID_SIZE,
+            (food.y - 0.5) * GRID_SIZE
+        );
+    });
+
+    // Draw special items
+    specialItems.forEach(item => {
+        drawCharacter(item.x, item.y, item.symbol, item.color, true);
+    });
+
+    // Draw worm
+    worm.forEach((segment, index) => {
+        let char = index === 0 ? '@' : segment.byte.toString(16).padStart(2, '0').toUpperCase();
+        let color = segment.color;
+        
+        if (isCompressed && index > compressionStartIndex) {
+            color = '#0088FF';
+        }
+        
+        if (isDeRezImmune && index === 0) {
+            // Add shield effect to head when DeRez is active
+            drawCharacter(segment.x, segment.y, '*', '#FF0000', true);
+        }
+        
+        drawCharacter(segment.x, segment.y, char, color, true);
+    });
+}
+
+// Add this new function to create the grid pattern
+function createGridCanvas() {
+    const gridCanvas = document.createElement('canvas');
+    gridCanvas.width = 40;
+    gridCanvas.height = 40;
+    const gridCtx = gridCanvas.getContext('2d');
+    
+    // Draw grid cell
+    gridCtx.fillStyle = '#001100';
+    gridCtx.fillRect(0, 0, 40, 40);
+    
+    // Draw grid lines
+    gridCtx.strokeStyle = '#003300';
+    gridCtx.lineWidth = 1;
+    
+    // Vertical line
+    gridCtx.beginPath();
+    gridCtx.moveTo(20, 0);
+    gridCtx.lineTo(20, 40);
+    gridCtx.stroke();
+    
+    // Horizontal line
+    gridCtx.beginPath();
+    gridCtx.moveTo(0, 20);
+    gridCtx.lineTo(40, 20);
+    gridCtx.stroke();
+    
+    return gridCanvas;
+}
+
+function drawCharacter(x, y, char, color, glow = false) {
+    ctx.font = `${GRID_SIZE * 0.8}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color;
+    
+    if (glow) {
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 10;
+    }
+    
+    ctx.fillText(
+        char,
+        x * GRID_SIZE + GRID_SIZE / 2,
+        y * GRID_SIZE + GRID_SIZE / 2
+    );
+    
+    if (glow) {
+        ctx.shadowBlur = 0;
+    }
+}
+
+// Food and special item placement
+function placeFood() {
+    // Select tensor size based on probability
+    let selectedSize;
+    const rand = Math.random();
+    let probabilitySum = 0;
+    
+    for (const sizeConfig of TENSOR_SIZES) {
+        probabilitySum += sizeConfig.probability;
+        if (rand <= probabilitySum) {
+            selectedSize = sizeConfig.size;
+            break;
+        }
+    }
+    
+    const fileType = FILE_TYPES[Math.floor(Math.random() * FILE_TYPES.length)];
+    let x, y;
+    let validPosition = false;
+    let attempts = 0;
+    const maxAttempts = 100;
+    
+    while (!validPosition && attempts < maxAttempts) {
+        attempts++;
+        x = Math.floor(Math.random() * (tileCountX - selectedSize));
+        y = Math.floor(Math.random() * (tileCountY - selectedSize));
+        validPosition = true;
+        
+        // Check collision with worm
+        for (let segment of worm) {
+            for (let fx = 0; fx < selectedSize; fx++) {
+                for (let fy = 0; fy < selectedSize; fy++) {
+                    if (Math.abs(segment.x - (x + fx)) < SEGMENT_SPACING &&
+                        Math.abs(segment.y - (y + fy)) < SEGMENT_SPACING) {
+                        validPosition = false;
+                        break;
+                    }
+                }
+                if (!validPosition) break;
+            }
+            if (!validPosition) break;
+        }
+        
+        // Check collision with other food items
+        if (validPosition) {
+            for (let food of foodItems) {
+                const distance = Math.max(
+                    Math.abs(x - (food.x + food.size)),
+                    Math.abs((x + selectedSize) - food.x),
+                    Math.abs(y - (food.y + food.size)),
+                    Math.abs((y + selectedSize) - food.y)
+                );
+                if (distance < 2) {
+                    validPosition = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (validPosition) {
+        foodItems.push({
+            x: x,
+            y: y,
+            size: selectedSize,
+            type: fileType.type,
+            bytes: fileType.generateBytes(selectedSize),
+            color: fileType.color
+        });
+    }
+}
+
+function placeSpecialItem() {
+    const specialItem = SPECIAL_ITEMS[Math.floor(Math.random() * SPECIAL_ITEMS.length)];
+    let x, y;
+    let validPosition = false;
+    let attempts = 0;
+    const maxAttempts = 50;
+    
+    while (!validPosition && attempts < maxAttempts) {
+        attempts++;
+        x = Math.floor(Math.random() * tileCountX);
+        y = Math.floor(Math.random() * tileCountY);
+        validPosition = true;
+        
+        // Check collision with worm
+        for (let segment of worm) {
+            if (Math.abs(segment.x - x) < SEGMENT_SPACING &&
+                Math.abs(segment.y - y) < SEGMENT_SPACING) {
+                validPosition = false;
+                break;
+            }
+        }
+        
+        // Check collision with food items
+        if (validPosition) {
+            for (let food of foodItems) {
+                if (x >= food.x - 1 && x < food.x + food.size + 1 &&
+                    y >= food.y - 1 && y < food.y + food.size + 1) {
+                    validPosition = false;
+                    break;
+                }
+            }
+        }
+        
+        // Check collision with other special items
+        if (validPosition) {
+            for (let item of specialItems) {
+                if (Math.abs(item.x - x) < 2 &&
+                    Math.abs(item.y - y) < 2) {
+                    validPosition = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (validPosition) {
+        specialItems.push({
+            x: x,
+            y: y,
+            type: specialItem.type,
+            color: specialItem.color,
+            effect: specialItem.effect,
+            symbol: specialItem.symbol
+        });
+    }
+}
+
+function resetGame() {
+    if (powerupTimer) {
+        clearTimeout(powerupTimer);
+    }
+    
+    initWorm();
+    velocity = { x: 0, y: 0 };
+    foodItems = [];
+    specialItems = [];
+    score = 0;
+    collectedBytes = [];
+    isCompressed = false;
+    isDeRezImmune = false;
+    deRezHitsRemaining = 0;
+    compressionStartIndex = -1;
+    gameActive = true;
+    
+    clearInterval(gameInterval);
+    gameInterval = setInterval(gameLoop, gameSpeed);
+    
+    for (let i = 0; i < 3; i++) {
+        placeFood();
+    }
+    
+    gameOverScreen.style.display = 'none';
+}
+
+function updateInfoOverlay() {
+    let statusEffects = [];
+    if (isCompressed) statusEffects.push('COMPRESSED');
+    if (isDeRezImmune) statusEffects.push(`DEREZ SHIELD (${deRezHitsRemaining})`);
+    
+    infoOverlay.innerHTML = `
+        Score: ${score}<br>
+        Length: ${worm.length}<br>
+        Collected Bytes: ${collectedBytes.length}<br>
+        Speed: ${overclock ? 'OVERCLOCKED' : 'NORMAL'}<br>
+        ${statusEffects.length ? 'Status: ' + statusEffects.join(', ') + '<br>' : ''}
+        <br>
+        Controls:<br>
+        WASD - Move<br>
+        Space - Overclock/Restart
+    `;
+}
+
+// Window resize handler
+window.addEventListener('resize', function() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    tileCountX = Math.floor(canvas.width / GRID_SIZE);
+    tileCountY = Math.floor(canvas.height / GRID_SIZE);
+});
+
+// Start the game
+init();
+</script>
+</body>
+</html>
